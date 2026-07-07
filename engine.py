@@ -143,6 +143,7 @@ def evaluate(data_loader, model, device, use_amp=False):
 
     # switch to evaluation mode
     model.eval()
+    maxk = 5
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
         target = batch[-1]
@@ -159,7 +160,12 @@ def evaluate(data_loader, model, device, use_amp=False):
             output = model(images)
             loss = criterion(output, target)
 
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        num_classes = output.size(1)
+        maxk = min(5, num_classes)
+        topk = (1,) if maxk == 1 else (1, maxk)
+        accs = accuracy(output, target, topk=topk)
+        acc1 = accs[0]
+        acc5 = accs[1] if len(accs) > 1 else accs[0]
 
         batch_size = images.shape[0]
         metric_logger.update(loss=loss.item())
@@ -167,7 +173,9 @@ def evaluate(data_loader, model, device, use_amp=False):
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
-          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+    topk_label = 5 if maxk >= 5 else maxk
+    print('* Acc@1 {top1.global_avg:.3f} Acc@{k} {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
+          .format(top1=metric_logger.acc1, top5=metric_logger.acc5,
+                  losses=metric_logger.loss, k=topk_label))
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

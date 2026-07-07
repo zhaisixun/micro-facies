@@ -46,7 +46,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('ConvNeXt training and evaluation script for image classification', add_help=False)
     parser.add_argument('--batch_size', default=64, type=int,
                         help='Per GPU batch size')
-    parser.add_argument('--epochs', default=100, type=int)
+    parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--update_freq', default=1, type=int,
                         help='gradient accumulation steps')
 
@@ -59,6 +59,11 @@ def get_args_parser():
                         help='image input size')
     parser.add_argument('--layer_scale_init_value', default=1e-6, type=float,
                         help="Layer scale initial values")
+    parser.add_argument(
+        '--dlka_stages', default='2,3', type=str,
+        help='Replace 7x7 DwConv with deformable_LKA on these stages (0-3).'
+             'Examples: "2,3" (recommended), "all", or omit for vanilla ConvNeXt.',
+    )
 
     # EMA related parameters
     # 对模型的参数做平均，以求提高测试指标并增加模型鲁棒
@@ -101,6 +106,9 @@ def get_args_parser():
                         help='Use AutoAugment policy. "v0" or "original". " + "(default: rand-m9-mstd0.5-inc1)'),
     parser.add_argument('--smoothing', type=float, default=0.1,
                         help='Label smoothing (default: 0.1)')
+    parser.add_argument('--class_weight', type=str2bool, default=False,
+                        help='Use inverse-frequency class weights in cross-entropy '
+                             '(computed from training set class counts).')
     parser.add_argument('--train_interpolation', type=str, default='bicubic',
                         help='Training interpolation (random, bilinear, bicubic default: "bicubic")')
 
@@ -204,7 +212,11 @@ def get_args_parser():
     parser.add_argument('--dist_eval', type=str2bool, default=True,
                         help='Enabling distributed evaluation')   # 启用分布式评估
     parser.add_argument('--disable_eval', type=str2bool, default=False,
-                        help='Disabling evaluation during training')   # 禁用评估 during training
+                        help='Disabling evaluation during training')
+    parser.add_argument('--eval_full_well_each_epoch', type=str2bool, default=False,
+                        help='WELLLOG_XLSX: run slow full-well point-wise eval every epoch. '
+                             'Default False uses batched val-loader eval for best-ckpt selection; '
+                             'full-well CSV is still generated after training.')
     parser.add_argument('--num_workers', default=16, type=int)   # 指定数据加载时使用的工作进程数
     parser.add_argument('--pin_mem', type=str2bool, default=True,   # 将CPU内存绑定到DataLoader，以提高效率
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
@@ -325,15 +337,24 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
+    dlka_stages = None
+    if args.dlka_stages is not None:
+        s = args.dlka_stages.strip().lower()
+        if s in ("all", "true", "1"):
+            dlka_stages = "all"
+        else:
+            dlka_stages = tuple(int(x) for x in s.split(","))
+
     model = create_model(
-        args.model, 
-        pretrained=False, 
+        args.model,
+        pretrained=False,
         in_chans=5,
-        num_classes=args.nb_classes, 
+        num_classes=args.nb_classes,
         drop_path_rate=args.drop_path,
         layer_scale_init_value=args.layer_scale_init_value,
         head_init_scale=args.head_init_scale,
-        )
+        dlka_stages=dlka_stages,
+    )
 
     if args.finetune:
         if args.finetune.startswith('https'):
@@ -417,9 +438,28 @@ def main(args):
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
+    class_weight_tensor = None
+    if args.class_weight and hasattr(dataset_train, 'class_counts'):
+        class_weight_tensor = utils.compute_class_weights(
+            dataset_train.class_counts, args.nb_classes).to(device)
+        inv_map = getattr(dataset_train, 'inv_label_map', {})
+        weight_info = {
+            inv_map.get(i, i): round(class_weight_tensor[i].item(), 4)
+            for i in range(args.nb_classes)
+        }
+        print(f"Class weights (inverse freq, mean=1): {weight_info}")
+    elif args.class_weight:
+        print("Warning: --class_weight set but dataset has no class_counts; using unweighted loss.")
+
     if mixup_fn is not None:
-        # smoothing is handled with mixup label transform
+        if class_weight_tensor is not None:
+            print("Warning: class weights are ignored when mixup/cutmix is enabled.")
         criterion = SoftTargetCrossEntropy()
+    elif class_weight_tensor is not None:
+        criterion = torch.nn.CrossEntropyLoss(
+            weight=class_weight_tensor,
+            label_smoothing=args.smoothing if args.smoothing > 0 else 0.0,
+        )
     elif args.smoothing > 0.:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
@@ -431,10 +471,19 @@ def main(args):
         args=args, model=model, model_without_ddp=model_without_ddp,
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
 
-    if args.eval:
-        print(f"Eval only mode")
-        test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
-        print(f"Accuracy of the network on {len(dataset_val)} test images: {test_stats['acc1']:.5f}%")
+    if args.eval:  # 评估模式
+        print("Eval only mode")
+        is_welllog = getattr(args, 'data_set', None) == 'WELLLOG_XLSX'
+        if is_welllog and dataset_val is not None:
+            test_stats = evaluate_full_well(
+                dataset_val, model, device,
+                use_amp=args.use_amp,
+                min_segment_length=getattr(args, 'min_segment_length', 1),
+            )
+            print(f"Full-well accuracy: {test_stats['acc1']:.5f}%")
+        else:
+            test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
+            print(f"Accuracy on {len(dataset_val)} val samples: {test_stats['acc1']:.5f}%")
         return
 
     max_accuracy = 0.0
@@ -464,8 +513,9 @@ def main(args):
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
         if data_loader_val is not None:
-            is_welllog = (getattr(args, 'data_set', None) == 'WELLLOG_XLSX')
-            if is_welllog and dataset_val is not None:
+            is_welllog = getattr(args, 'data_set', None) == 'WELLLOG_XLSX'
+            use_full_well = is_welllog and args.eval_full_well_each_epoch
+            if use_full_well and dataset_val is not None:
                 test_stats = evaluate_full_well(
                     dataset_val, model, device,
                     use_amp=args.use_amp,
@@ -474,7 +524,16 @@ def main(args):
                 print(f"Full-well accuracy: {test_stats['acc1']:.2f}%")
             else:
                 test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
-                print(f"Accuracy of the model on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+                if is_welllog:
+                    print(
+                        f"Val batch accuracy (fast): {test_stats['acc1']:.2f}% "
+                        f"on {len(dataset_val)} window samples"
+                    )
+                else:
+                    print(
+                        f"Accuracy of the model on the {len(dataset_val)} "
+                        f"test images: {test_stats['acc1']:.1f}%"
+                    )
             if max_accuracy < test_stats["acc1"]:
                 max_accuracy = test_stats["acc1"]
                 if args.output_dir and args.save_ckpt:
@@ -524,8 +583,7 @@ def main(args):
     if wandb_logger and args.wandb_ckpt and args.save_ckpt and args.output_dir:
         wandb_logger.log_checkpoints()
 
-    # After training: generate dense per-depth-point prediction CSV for val wells.
-    # Load best checkpoint so predictions align with the best reported accuracy.
+    # After training (WELLLOG): load best ckpt, full-well eval + dense CSV (original logic).
     if args.data_set == "WELLLOG_XLSX" and dataset_val is not None \
             and args.output_dir and utils.is_main_process():
         best_ckpt = os.path.join(args.output_dir, "checkpoint-best.pth")
@@ -533,11 +591,21 @@ def main(args):
             best_state = torch.load(best_ckpt, map_location="cpu")
             ckpt_model = best_state.get("model", best_state)
             model_without_ddp.load_state_dict(ckpt_model)
-            print(f"Loaded best checkpoint for prediction: {best_ckpt}")
+            print(f"Loaded best checkpoint for full-well export: {best_ckpt}")
+        else:
+            print("No checkpoint-best.pth found; using final epoch weights for export.")
+        fw_stats = evaluate_full_well(
+            dataset_val, model, device,
+            use_amp=args.use_amp,
+            min_segment_length=args.min_segment_length,
+        )
+        print(f"Final full-well accuracy (best ckpt): {fw_stats['acc1']:.2f}%")
         csv_path = os.path.join(args.output_dir, "predictions.csv")
-        save_predictions_csv(dataset_val, model, device, csv_path,
-                             use_amp=args.use_amp,
-                             min_segment_length=args.min_segment_length)
+        save_predictions_csv(
+            dataset_val, model, device, csv_path,
+            use_amp=args.use_amp,
+            min_segment_length=args.min_segment_length,
+        )
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

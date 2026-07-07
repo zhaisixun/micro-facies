@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import trunc_normal_, DropPath
 from timm.models.registry import register_model
-from .convnext import Block, LayerNorm
+from .convnext import Block, LayerNorm, _parse_dlka_stages
 
 class ConvNeXtIsotropic(nn.Module):
     r""" ConvNeXt
@@ -29,17 +29,25 @@ class ConvNeXtIsotropic(nn.Module):
         layer_scale_init_value (float): Init value for Layer Scale. Default: 0.
         head_init_scale (float): Init scaling value for classifier weights and biases. Default: 1.
     """
-    def __init__(self, in_chans=3, num_classes=1000, 
-                 depth=18, dim=384, drop_path_rate=0., 
+    def __init__(self, in_chans=3, num_classes=1000,
+                 depth=18, dim=384, drop_path_rate=0.,
                  layer_scale_init_value=0, head_init_scale=1.,
+                 dlka_stages=None,
                  ):
         super().__init__()
+        use_dlka = bool(_parse_dlka_stages(dlka_stages))
 
         self.stem = nn.Conv2d(in_chans, dim, kernel_size=16, stride=16)
-        dp_rates=[x.item() for x in torch.linspace(0, drop_path_rate, depth)] 
-        self.blocks = nn.Sequential(*[Block(dim=dim, drop_path=dp_rates[i], 
-                                    layer_scale_init_value=layer_scale_init_value)
-                                    for i in range(depth)])
+        dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        self.blocks = nn.Sequential(*[
+            Block(
+                dim=dim,
+                drop_path=dp_rates[i],
+                layer_scale_init_value=layer_scale_init_value,
+                use_dlka=use_dlka,
+            )
+            for i in range(depth)
+        ])
 
         self.norm = LayerNorm(dim, eps=1e-6) # final norm layer
         self.head = nn.Linear(dim, num_classes)

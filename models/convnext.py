@@ -11,21 +11,41 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import trunc_normal_, DropPath
 from timm.models.registry import register_model
+from .deformable_LKA.deformable_LKA import deformable_LKA
+
+
+def _parse_dlka_stages(dlka_stages):
+    """Stage indices (0–3) that use deformable_LKA instead of 7x7 DwConv."""
+    if dlka_stages is None or dlka_stages is False:
+        return set()
+    if dlka_stages is True or dlka_stages == "all":
+        return {0, 1, 2, 3}
+    if isinstance(dlka_stages, int):
+        return {dlka_stages}
+    return set(dlka_stages)
+
 
 class Block(nn.Module):
     r""" ConvNeXt Block. There are two equivalent implementations:
     (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
     (2) DwConv -> Permute to (N, H, W, C); LayerNorm (channels_last) -> Linear -> GELU -> Linear; Permute back
     We use (2) as we find it slightly faster in PyTorch
-    
+
+    When ``use_dlka=True``, the 7x7 depthwise conv is replaced by ``deformable_LKA`` (spatial gating only,
+    without the full D-LKA Attention wrapper).
+
     Args:
         dim (int): Number of input channels.
         drop_path (float): Stochastic depth rate. Default: 0.0
         layer_scale_init_value (float): Init value for Layer Scale. Default: 1e-6.
+        use_dlka (bool): If True, use deformable_LKA instead of 7x7 DwConv for spatial mixing.
     """
-    def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6):
+    def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6, use_dlka=False):
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim) # depthwise conv   输入特征图通道数=（单通道）卷积核个数=输出特征图个数
+        if use_dlka:
+            self.spatial_mix = deformable_LKA(dim)
+        else:
+            self.spatial_mix = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
         self.norm = LayerNorm(dim, eps=1e-6)
         self.pwconv1 = nn.Linear(dim, 4 * dim) # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
@@ -36,7 +56,7 @@ class Block(nn.Module):
 
     def forward(self, x):
         input = x
-        x = self.dwconv(x)
+        x = self.spatial_mix(x)
         x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
         x = self.norm(x)
         x = self.pwconv1(x)
@@ -62,12 +82,17 @@ class ConvNeXt(nn.Module):
         drop_path_rate (float): Stochastic depth rate. Default: 0.
         layer_scale_init_value (float): Init value for Layer Scale. Default: 1e-6.
         head_init_scale (float): Init scaling value for classifier weights and biases. Default: 1.
+        dlka_stages (int, tuple, str, or None): Stage indices that use deformable_LKA for spatial
+            mixing. None disables D-LKA (original 7x7 DwConv). "all" or True enables all stages.
+            Recommended: (2, 3) for lower compute on high-resolution stages.
     """
-    def __init__(self, in_chans=3, num_classes=1000, 
-                 depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate=0., 
+    def __init__(self, in_chans=3, num_classes=1000,
+                 depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate=0.,
                  layer_scale_init_value=1e-6, head_init_scale=1.,
+                 dlka_stages=None,
                  ):
         super().__init__()
+        dlka_stage_set = _parse_dlka_stages(dlka_stages)
 
         self.downsample_layers = nn.ModuleList() # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
@@ -86,9 +111,14 @@ class ConvNeXt(nn.Module):
         dp_rates=[x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))] 
         cur = 0
         for i in range(4):
+            use_dlka = i in dlka_stage_set
             stage = nn.Sequential(
-                *[Block(dim=dims[i], drop_path=dp_rates[cur + j],  # 深度残差块
-                layer_scale_init_value=layer_scale_init_value) for j in range(depths[i])]
+                *[Block(
+                    dim=dims[i],
+                    drop_path=dp_rates[cur + j],
+                    layer_scale_init_value=layer_scale_init_value,
+                    use_dlka=use_dlka,
+                ) for j in range(depths[i])]
             )
             self.stages.append(stage)
             cur += depths[i]
@@ -199,4 +229,43 @@ def convnext_xlarge(pretrained=False, in_22k=False, **kwargs):
         url = model_urls['convnext_xlarge_22k']
         checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu")
         model.load_state_dict(checkpoint["model"])
+    return model
+
+
+def _load_convnext_pretrained(model, url, *, check_hash=False):
+    checkpoint = torch.hub.load_state_dict_from_url(
+        url=url, map_location="cpu", check_hash=check_hash)
+    state = checkpoint.get("model", checkpoint)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        print(
+            f"Pretrained load (strict=False): missing={len(missing)}, "
+            f"unexpected={len(unexpected)} (spatial_mix keys are not in checkpoint)"
+        )
+
+
+@register_model
+def convnext_tiny_dlka(pretrained=False, in_22k=False, dlka_stages=(2, 3), **kwargs):
+    model = ConvNeXt(depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], dlka_stages=dlka_stages, **kwargs)
+    if pretrained:
+        url = model_urls['convnext_tiny_22k'] if in_22k else model_urls['convnext_tiny_1k']
+        _load_convnext_pretrained(model, url, strict=False)
+    return model
+
+
+@register_model
+def convnext_small_dlka(pretrained=False, in_22k=False, dlka_stages=(2, 3), **kwargs):
+    model = ConvNeXt(depths=[3, 3, 27, 3], dims=[96, 192, 384, 768], dlka_stages=dlka_stages, **kwargs)
+    if pretrained:
+        url = model_urls['convnext_small_22k'] if in_22k else model_urls['convnext_small_1k']
+        _load_convnext_pretrained(model, url, strict=False)
+    return model
+
+
+@register_model
+def convnext_base_dlka(pretrained=False, in_22k=False, dlka_stages=(2, 3), **kwargs):
+    model = ConvNeXt(depths=[3, 3, 27, 3], dims=[128, 256, 512, 1024], dlka_stages=dlka_stages, **kwargs)
+    if pretrained:
+        url = model_urls['convnext_base_22k'] if in_22k else model_urls['convnext_base_1k']
+        _load_convnext_pretrained(model, url, strict=False)
     return model

@@ -18,6 +18,8 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
 from torch._six import inf
 
 from tensorboardX import SummaryWriter
@@ -423,6 +425,45 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     else:
         total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), norm_type).to(device) for p in parameters]), norm_type)
     return total_norm
+
+
+def compute_class_weights(class_counts, nb_classes, min_count=1.0):
+    """Inverse-frequency weights from training counts; mean weight normalized to 1."""
+    counts = torch.full((nb_classes,), float(min_count), dtype=torch.float32)
+    for cls, cnt in class_counts.items():
+        idx = int(cls)
+        if 0 <= idx < nb_classes:
+            counts[idx] = max(float(cnt), min_count)
+    weights = counts.sum() / (nb_classes * counts)
+    return weights / weights.mean()
+
+
+class WeightedCrossEntropyLoss(nn.Module):
+    """Cross-entropy with optional class weights and label smoothing (PyTorch < 1.10 compatible)."""
+
+    def __init__(self, weight=None, label_smoothing=0.0):
+        super().__init__()
+        if weight is not None:
+            self.register_buffer('weight', weight)
+        else:
+            self.weight = None
+        self.label_smoothing = float(label_smoothing)
+
+    def forward(self, pred, target):
+        if self.label_smoothing > 0:
+            log_probs = F.log_softmax(pred, dim=-1)
+            nll_loss = -log_probs.gather(dim=-1, index=target.unsqueeze(1)).squeeze(1)
+            smooth_loss = -log_probs.mean(dim=-1)
+            loss = (1.0 - self.label_smoothing) * nll_loss + self.label_smoothing * smooth_loss
+        else:
+            loss = F.cross_entropy(pred, target, weight=self.weight, reduction='none')
+            if self.weight is not None:
+                return loss.mean()
+            return loss.mean()
+
+        if self.weight is not None:
+            loss = loss * self.weight[target]
+        return loss.mean()
 
 
 def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0,
