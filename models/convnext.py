@@ -124,7 +124,7 @@ class ConvNeXt(nn.Module):
             cur += depths[i]
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6) # final norm layer
-        self.head = nn.Linear(dims[-1], num_classes)
+        self.head = nn.Linear(dims[-1], num_classes)  # 分类头
 
         self.apply(self._init_weights)
         self.head.weight.data.mul_(head_init_scale)

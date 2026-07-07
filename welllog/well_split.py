@@ -121,3 +121,25 @@ def check_train_covers_all_classes(
 def get_well_classes(xlsx_path: str, label_col: str) -> Dict[str, Set[str]]:
     """Public wrapper around _read_well_classes (for use in run_cross_val)."""
     return _read_well_classes(xlsx_path, label_col)
+
+
+def list_all_wells(xlsx_path: str, label_col: str) -> List[str]:
+    """Return sorted sheet names that contain a valid ``label_col`` and labels."""
+    wells = sorted(_read_well_classes(xlsx_path, label_col).keys())
+    if not wells:
+        raise ValueError(
+            f"No wells with column '{label_col}' and non-empty labels found in '{xlsx_path}'."
+        )
+    return wells
+
+
+def resolve_eval_wells(eval_wells: str, train_wells: List[str]) -> List[str]:
+    """Resolve --eval_wells into a val/eval well list."""
+    key = str(eval_wells).strip().lower()
+    if not key:
+        return []
+    if key == "same_as_train":
+        if not train_wells:
+            raise ValueError("--eval_wells same_as_train requires non-empty train wells.")
+        return list(train_wells)
+    return [w.strip() for w in eval_wells.split(",") if w.strip()]

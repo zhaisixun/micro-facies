@@ -49,6 +49,9 @@ def get_args_parser():
     p.add_argument("--window_size", default=100, type=int)
     p.add_argument("--window_stride", default=0, type=int, help="0 = auto (window_size//2)")
     p.add_argument("--input_size", default=224, type=int)
+    p.add_argument("--use_1d_conv", default=False, action="store_true",
+                   help="use 1D ConvNeXt instead of 2D bilinear stretch")
+    p.add_argument("--task_mode", default="classification", choices=["classification", "segmentation"])
 
     # Model
     p.add_argument("--model", default="convnext_tiny")
@@ -68,6 +71,52 @@ def get_args_parser():
     # Output / post-process (forwarded to main.py)
     p.add_argument("--min_segment_length", default=5, type=int,
                    help="short-segment merge for predictions.csv; 1 = off")
+    p.add_argument("--use_supcon", default=False, action="store_true")
+    p.add_argument("--supcon_weight", default=0.5, type=float)
+    p.add_argument("--embedding_dim", default=128, type=int)
+    p.add_argument("--supcon_temperature", default=0.07, type=float)
+    p.add_argument("--balanced_sampler", default=True, action="store_true")
+    p.add_argument("--no_balanced_sampler", dest="balanced_sampler", action="store_false")
+    p.add_argument("--infer_mode", default="linear", choices=["linear", "prototype"])
+    p.add_argument("--prototype_cache", default="", type=str)
+    p.add_argument("--infer_stride", default=0, type=int,
+                   help="segmentation inference stride; 0 = window_size//4")
+    p.add_argument("--infer_fusion", default="weighted_center", choices=["mean", "weighted_center", "vote"])
+    p.add_argument("--loss_mode", default="ce_focal_dice",
+                   choices=["ce", "ce_focal", "ce_dice", "ce_focal_dice"])
+    p.add_argument("--ignore_index", default=-100, type=int)
+    p.add_argument("--focal_gamma", default=2.0, type=float)
+    p.add_argument("--ce_weight", default=1.0, type=float)
+    p.add_argument("--focal_weight", default=0.5, type=float)
+    p.add_argument("--dice_weight", default=0.5, type=float)
+    p.add_argument("--class_weight", default=False, action="store_true")
+    p.add_argument("--eval_wells", default="", type=str)
+    p.add_argument("--class_weights", default="", type=str)
+    p.add_argument("--class_weights_normalize", default=True, action="store_true")
+    p.add_argument("--no_class_weights_normalize", dest="class_weights_normalize", action="store_false")
+    p.add_argument("--seg_oversample", default=True, action="store_true")
+    p.add_argument("--no_seg_oversample", dest="seg_oversample", action="store_false")
+    p.add_argument("--seg_oversample_boost", default=5.0, type=float)
+    p.add_argument("--resmote", default=False, action="store_true")
+    p.add_argument("--resmote_classes", default="1,2", type=str)
+    p.add_argument("--resmote_target_ratio", default=0.15, type=float)
+    p.add_argument("--resmote_target_count", default=0, type=int)
+    p.add_argument("--resmote_k", default=5, type=int)
+    p.add_argument("--resmote_depth_radius", default=5.0, type=float)
+    p.add_argument("--resmote_iterations", default=3, type=int)
+    p.add_argument("--resmote_lof", default=False, action="store_true")
+    p.add_argument("--resmote_lof_contamination", default=0.05, type=float)
+    p.add_argument("--resmote_seed", default=-1, type=int)
+    p.add_argument("--input_mode", default="raw", choices=["raw", "emd_spectrum"])
+    p.add_argument("--window_require_pure", default=False, action="store_true")
+    p.add_argument("--emd_n_imfs", default=5, type=int)
+    p.add_argument("--emd_cache_dir", default="./cache/emd", type=str)
+    p.add_argument("--gan", default=False, action="store_true")
+    p.add_argument("--gan_classes", default="1,2", type=str)
+    p.add_argument("--gan_per_class", default=100, type=int)
+    p.add_argument("--gan_ckpt_dir", default="./checkpoints/gan", type=str)
+    p.add_argument("--gan_train_epochs", default=200, type=int)
+    p.add_argument("--best_metric", default="", choices=["", "acc1", "miou"])
     p.add_argument("--base_output_dir", default="./outputs/cross_val")
     p.add_argument("--python", default=sys.executable, help="python executable to use")
 
@@ -93,6 +142,8 @@ def run_fold(fold_idx, test_well, train_wells, args):
         "--window_size", str(args.window_size),
         "--window_stride", str(args.window_stride),
         "--input_size", str(args.input_size),
+        "--use_1d_conv", "true" if args.use_1d_conv else "false",
+        "--task_mode", args.task_mode,
         "--model", args.model,
         "--drop_path", str(args.drop_path),
         "--batch_size", str(args.batch_size),
@@ -108,11 +159,57 @@ def run_fold(fold_idx, test_well, train_wells, args):
         "--cutmix", "0",
         "--smoothing", "0",
         "--min_segment_length", str(args.min_segment_length),
+        "--class_weight", "true" if args.class_weight else "false",
+        "--class_weights_normalize", "true" if args.class_weights_normalize else "false",
+        "--use_supcon", "true" if args.use_supcon else "false",
+        "--supcon_weight", str(args.supcon_weight),
+        "--embedding_dim", str(args.embedding_dim),
+        "--supcon_temperature", str(args.supcon_temperature),
+        "--balanced_sampler", "true" if args.balanced_sampler else "false",
+        "--infer_mode", args.infer_mode,
+        "--prototype_cache", args.prototype_cache,
+        "--infer_stride", str(args.infer_stride),
+        "--infer_fusion", args.infer_fusion,
+        "--loss_mode", args.loss_mode,
+        "--ignore_index", str(args.ignore_index),
+        "--focal_gamma", str(args.focal_gamma),
+        "--ce_weight", str(args.ce_weight),
+        "--focal_weight", str(args.focal_weight),
+        "--dice_weight", str(args.dice_weight),
+        "--seg_oversample", "true" if args.seg_oversample else "false",
+        "--seg_oversample_boost", str(args.seg_oversample_boost),
+        "--resmote", "true" if args.resmote else "false",
+        "--resmote_classes", args.resmote_classes,
+        "--resmote_target_ratio", str(args.resmote_target_ratio),
+        "--resmote_target_count", str(args.resmote_target_count),
+        "--resmote_k", str(args.resmote_k),
+        "--resmote_depth_radius", str(args.resmote_depth_radius),
+        "--resmote_iterations", str(args.resmote_iterations),
+        "--resmote_lof", "true" if args.resmote_lof else "false",
+        "--resmote_lof_contamination", str(args.resmote_lof_contamination),
+        "--resmote_seed", str(args.resmote_seed),
+        "--input_mode", args.input_mode,
+        "--window_require_pure", "true" if args.window_require_pure else "false",
+        "--emd_n_imfs", str(args.emd_n_imfs),
+        "--emd_cache_dir", args.emd_cache_dir,
+        "--gan", "true" if args.gan else "false",
+        "--gan_classes", args.gan_classes,
+        "--gan_per_class", str(args.gan_per_class),
+        "--gan_ckpt_dir", args.gan_ckpt_dir,
+        "--gan_train_epochs", str(args.gan_train_epochs),
+    ]
+    if args.eval_wells:
+        cmd.extend(["--eval_wells", args.eval_wells])
+    if args.class_weights:
+        cmd.extend(["--class_weights", args.class_weights])
+    if args.best_metric:
+        cmd.extend(["--best_metric", args.best_metric])
+    cmd.extend([
         "--output_dir", output_dir,
         "--save_ckpt", "true",
         "--auto_resume", "false",
         "--dist_eval", "false",
-    ]
+    ])
 
     log_file = os.path.join(output_dir, "train.log")
     print(f"\n{'='*60}")

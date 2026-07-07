@@ -9,4 +9,6 @@ __pycache__/
 # 忽略大文件、权重或数据集（根据实际情况调整）
 *.pth
 *.pkl
-output/
+outputs/
+*.xlsx
+docs/

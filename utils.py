@@ -438,8 +438,123 @@ def compute_class_weights(class_counts, nb_classes, min_count=1.0):
     return weights / weights.mean()
 
 
+def parse_manual_class_weights(weights_str, nb_classes, normalize=True):
+    """Parse comma-separated per-class weights, e.g. '1,8,8,1' -> Tensor(nb_classes,)."""
+    if not weights_str or not str(weights_str).strip():
+        raise ValueError("Empty class_weights string.")
+
+    parts = [p.strip() for p in str(weights_str).split(",") if p.strip()]
+    if len(parts) != nb_classes:
+        raise ValueError(
+            f"--class_weights expects {nb_classes} values, got {len(parts)}: {weights_str!r}"
+        )
+
+    weights = torch.tensor([float(p) for p in parts], dtype=torch.float32)
+    if (weights < 0).any():
+        raise ValueError(f"Class weights must be non-negative, got {weights.tolist()}")
+
+    if normalize:
+        weights = weights / weights.mean().clamp_min(1e-12)
+    return weights
+
+
+def build_welllog_sample_weights(dataset, min_count=1.0):
+    """Per-sample weights for WeightedRandomSampler (inverse class frequency).
+
+    Classification: weight by the single window label.
+    Segmentation (legacy): weight by the dominant class in the window sequence.
+    Prefer :func:`build_welllog_segmentation_sample_weights` for segmentation oversampling.
+    """
+    if not hasattr(dataset, "samples"):
+        raise AttributeError("Dataset has no samples attribute for weight construction.")
+    from collections import Counter
+    class_counts = Counter()
+    for sample in dataset.samples:
+        y = sample[1]
+        if isinstance(y, (list, tuple)):
+            valid = [int(v) for v in y if int(v) >= 0]
+            if not valid:
+                continue
+            y = Counter(valid).most_common(1)[0][0]
+        class_counts[y] += 1
+    weights = []
+    for sample in dataset.samples:
+        y = sample[1]
+        if isinstance(y, (list, tuple)):
+            valid = [int(v) for v in y if int(v) >= 0]
+            y = Counter(valid).most_common(1)[0][0] if valid else 0
+        weights.append(1.0 / max(float(class_counts[y]), min_count))
+    return torch.DoubleTensor(weights)
+
+
+def build_welllog_segmentation_sample_weights(
+    dataset,
+    min_count=1.0,
+    boost=5.0,
+    rare_fraction=0.05,
+):
+    """Per-window weights for segmentation oversampling.
+
+    Windows that contain rare classes receive higher sampling weight.  Weight is
+    driven by the rarest class present in the window (not only the dominant class),
+    so thin layers embedded in a majority-class window are still oversampled.
+    """
+    if not hasattr(dataset, "samples"):
+        raise AttributeError("Dataset has no samples attribute for weight construction.")
+
+    point_counts = dict(getattr(dataset, "class_counts", {}))
+    if not point_counts:
+        raise ValueError("Dataset has no class_counts for segmentation weight construction.")
+
+    total_points = sum(point_counts.values())
+    n_classes = len(point_counts)
+    inv_freq = {
+        cls: total_points / (n_classes * max(float(cnt), min_count))
+        for cls, cnt in point_counts.items()
+    }
+    rare_threshold = total_points * float(rare_fraction)
+
+    weights = []
+    boosted = 0
+    for sample in dataset.samples:
+        y = sample[1]
+        valid = [int(v) for v in y if int(v) >= 0] if isinstance(y, (list, tuple)) else []
+        if not valid:
+            weights.append(1.0)
+            continue
+        classes_present = set(valid)
+        w = max(inv_freq.get(cls, 1.0) for cls in classes_present)
+        if any(point_counts.get(cls, 0) < rare_threshold for cls in classes_present):
+            w *= float(boost)
+            boosted += 1
+        weights.append(w)
+
+    weight_tensor = torch.DoubleTensor(weights)
+    weight_tensor = weight_tensor / weight_tensor.mean().clamp_min(1e-12)
+    return weight_tensor, boosted
+
+
+def resolve_best_metric(task_mode, best_metric):
+    """Default checkpoint metric: mIoU for segmentation, accuracy otherwise."""
+    if best_metric:
+        return best_metric
+    return "miou" if task_mode == "segmentation" else "acc1"
+
+
+def checkpoint_score(test_stats, metric):
+    """Scalar used to pick checkpoint-best from validation / full-well stats."""
+    if metric == "miou":
+        if "miou" in test_stats:
+            return float(test_stats["miou"])
+        print("Warning: best_metric=miou but mIoU missing; falling back to acc1.")
+    return float(test_stats.get("acc1", 0.0))
+
+
 class WeightedCrossEntropyLoss(nn.Module):
-    """Cross-entropy with optional class weights and label smoothing (PyTorch < 1.10 compatible)."""
+    """Cross-entropy with optional class weights and label smoothing (PyTorch < 1.10 compatible).
+
+    forward() 返回 per-sample loss 向量（shape: (B,)），方便调用方乘以 sample_weights 后再 .mean()。
+    """
 
     def __init__(self, weight=None, label_smoothing=0.0):
         super().__init__()
@@ -450,6 +565,7 @@ class WeightedCrossEntropyLoss(nn.Module):
         self.label_smoothing = float(label_smoothing)
 
     def forward(self, pred, target):
+        """返回 per-sample loss，shape (B,)。调用方负责 .mean() 或加权后 .mean()。"""
         if self.label_smoothing > 0:
             log_probs = F.log_softmax(pred, dim=-1)
             nll_loss = -log_probs.gather(dim=-1, index=target.unsqueeze(1)).squeeze(1)
@@ -457,13 +573,32 @@ class WeightedCrossEntropyLoss(nn.Module):
             loss = (1.0 - self.label_smoothing) * nll_loss + self.label_smoothing * smooth_loss
         else:
             loss = F.cross_entropy(pred, target, weight=self.weight, reduction='none')
-            if self.weight is not None:
-                return loss.mean()
-            return loss.mean()
 
-        if self.weight is not None:
+        if self.weight is not None and self.label_smoothing > 0:
             loss = loss * self.weight[target]
-        return loss.mean()
+        return loss
+
+
+def get_per_sample_loss(criterion: nn.Module, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """统一获取 per-sample loss（shape: (B,)），兼容多种 criterion 类型。
+
+    - WeightedCrossEntropyLoss：直接返回 per-sample 向量
+    - torch.nn.CrossEntropyLoss / LabelSmoothingCrossEntropy 等：
+      若 reduction != 'none' 则临时以 reduction='none' 重新调用
+    """
+    if isinstance(criterion, WeightedCrossEntropyLoss):
+        return criterion(pred, target)
+    # timm LabelSmoothingCrossEntropy 及标准 nn.CrossEntropyLoss 均支持 reduction 参数
+    try:
+        return criterion(pred, target, reduction='none')  # timm 版支持此调用方式
+    except TypeError:
+        pass
+    # 标准 nn.CrossEntropyLoss：临时修改 reduction
+    old_reduction = getattr(criterion, 'reduction', 'mean')
+    criterion.reduction = 'none'
+    loss = criterion(pred, target)
+    criterion.reduction = old_reduction
+    return loss
 
 
 def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0,

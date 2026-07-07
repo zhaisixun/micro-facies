@@ -14,22 +14,40 @@ from timm.data.constants import \
     IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from timm.data import create_transform
 
-from welllog.dataset import WellLogSlidingWindowDataset
+from welllog.dataset import WellLogSlidingWindowDataset, WellLogWholeWellDataset
+from welllog.collate import collate_whole_well
+
+
+def build_welllog_collate_fn(args):
+    well_input_mode = getattr(args, "well_input_mode", "sliding_window")
+    if well_input_mode != "whole_well":
+        return None
+    ignore_index = getattr(args, "ignore_index", -100)
+
+    def _collate(batch):
+        return collate_whole_well(batch, ignore_index=ignore_index)
+
+    return _collate
 
 
 def build_dataset(is_train, args):
     if args.data_set == "WELLLOG_XLSX":
         # Training set builds the label_map; val set reuses it to keep indices consistent.
         label_map = None if is_train else getattr(args, '_welllog_label_map', None)
+        well_input_mode = getattr(args, "well_input_mode", "sliding_window")
 
-        if not is_train:
-            # Val set uses stride=1 so evaluate() covers every depth point (point-wise accuracy).
-            import copy
-            val_args = copy.copy(args)
-            val_args.window_stride = 1
-            dataset = WellLogSlidingWindowDataset(args=val_args, is_train=False, label_map=label_map)
+        if well_input_mode == "whole_well":
+            dataset = WellLogWholeWellDataset(args=args, is_train=is_train, label_map=label_map)
         else:
-            dataset = WellLogSlidingWindowDataset(args=args, is_train=True, label_map=label_map)
+            task_mode = getattr(args, "task_mode", "classification")
+            if not is_train and task_mode != "segmentation":
+                # Val set uses stride=1 so evaluate() covers every depth point (point-wise accuracy).
+                import copy
+                val_args = copy.copy(args)
+                val_args.window_stride = 1
+                dataset = WellLogSlidingWindowDataset(args=val_args, is_train=False, label_map=label_map)
+            else:
+                dataset = WellLogSlidingWindowDataset(args=args, is_train=is_train, label_map=label_map)
 
         if is_train:
             # Cache so the val dataset can reuse the same mapping.
@@ -39,9 +57,70 @@ def build_dataset(is_train, args):
         inv = {v: k for k, v in dataset.label_map.items()}
         readable_counts = {inv.get(k, k): v for k, v in sorted(dataset.class_counts.items())}
         print(f"[{split}] WellLog dataset samples: {len(dataset)}")
+        print(f"[{split}] task mode: {getattr(dataset, 'task_mode', 'classification')}")
+        print(f"[{split}] well input mode: {getattr(dataset, 'well_input_mode', 'sliding_window')}")
+        print(f"[{split}] conv mode: {'1D (C,L)' if getattr(args, 'use_1d_conv', False) else '2D (C,H,W)'}")
+        print(f"[{split}] input_mode: {getattr(args, 'input_mode', 'raw')}")
+        if getattr(args, "window_require_pure", False):
+            print(f"[{split}] window_require_pure: True (discard mixed-class windows)")
+        filter_stats = getattr(args, "_window_filter_stats", None)
+        if filter_stats:
+            print(
+                f"[{split}] windows total={filter_stats.get('total_windows', 0)} "
+                f"kept={filter_stats.get('kept_windows', 0)} "
+                f"discarded_mixed={filter_stats.get('discarded_mixed_or_invalid', 0)} "
+                f"discarded_purity={filter_stats.get('discarded_purity', 0)} "
+                # f"gan_synthetic={filter_stats.get('gan_synthetic', 0)}"
+            )
         print(f"[{split}] Number of classes: {nb_classes}")
         print(f"[{split}] label_map: {dataset.label_map}")
         print(f"[{split}] Class counts (original facies label): {readable_counts}")
+        # if is_train:
+        #     resmote_stats = getattr(args, "_resmote_stats", None)
+        #     if resmote_stats and resmote_stats.get("enabled"):
+        #         inv = {v: k for k, v in dataset.label_map.items()}
+        #         before = {
+        #             inv.get(int(k), k): v for k, v in sorted(resmote_stats.get("before", {}).items())
+        #         }
+        #         after = {
+        #             inv.get(int(k), k): v for k, v in sorted(resmote_stats.get("after", {}).items())
+        #         }
+        #         targets = {
+        #             inv.get(int(k), k): v for k, v in sorted(resmote_stats.get("targets", {}).items())
+        #         }
+        #         print(f"[RESMOTE] target_classes: {resmote_stats.get('target_classes')}")
+        #         print(f"[RESMOTE] before (real points): {before}")
+        #         print(f"[RESMOTE] targets: {targets}")
+        #         print(f"[RESMOTE] after  (all points): {after}")
+        #         print(f"[RESMOTE] inserted synthetic points: {resmote_stats.get('inserted', 0)}")
+        #         inserted_by_class = resmote_stats.get("inserted_by_class") or {}
+        #         if inserted_by_class:
+        #             readable_inserted = {
+        #                 inv.get(int(k), k): v for k, v in sorted(inserted_by_class.items())
+        #             }
+        #             print(f"[RESMOTE] inserted by class: {readable_inserted}")
+        #         for warning in resmote_stats.get("warnings") or []:
+        #             print(f"[RESMOTE] Warning: {warning}")
+        #     gan_stats = getattr(args, "_gan_stats", None)
+        #     if gan_stats and gan_stats.get("enabled"):
+        #         inv = {v: k for k, v in dataset.label_map.items()}
+        #         pure_by_class = gan_stats.get("pure_windows_by_class") or {}
+        #         readable_pure = {
+        #             inv.get(int(k), k): v for k, v in sorted(pure_by_class.items())
+        #         }
+        #         gen_by_class = gan_stats.get("generated_by_class") or {}
+        #         readable_gen = {
+        #             inv.get(int(k), k): v for k, v in sorted(gen_by_class.items())
+        #         }
+        #         print(f"[GAN] target_classes: {gan_stats.get('target_classes')}")
+        #         print(f"[GAN] pure windows by class: {readable_pure}")
+        #         print(f"[GAN] generated by class: {readable_gen}")
+        #         print(
+        #             f"[GAN] ckpt_dir={gan_stats.get('ckpt_dir')} "
+        #             f"loaded={gan_stats.get('loaded', 0)} trained={gan_stats.get('trained', 0)}"
+        #         )
+        #         for warning in gan_stats.get("warnings") or []:
+        #             print(f"[GAN] Warning: {warning}")
         return dataset, nb_classes
 
     transform = build_transform(is_train, args)
