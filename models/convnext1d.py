@@ -171,12 +171,14 @@ class PPM1d(nn.Module):
     """1D Pyramid Pooling Module (PPM) used by UPerHead."""
 
     def __init__(self, in_channels, out_channels, pool_scales=(1, 2, 3, 6)):
+        # in_channels = out_channels = 256
         super().__init__()
         self.pool_scales = pool_scales
-        branch_channels = out_channels // len(pool_scales)   #256//4=64
+        branch_channels = out_channels // len(pool_scales)   #256//4=64, 原文是512
         self.branches = nn.ModuleList([
             nn.Sequential(
                 nn.AdaptiveAvgPool1d(scale),
+                # 原文是4096->512，现在改成了256->64
                 nn.Conv1d(in_channels, branch_channels, kernel_size=1, bias=False),
                 LayerNorm1d(branch_channels, eps=1e-6, data_format="channels_first"),
                 nn.GELU(),

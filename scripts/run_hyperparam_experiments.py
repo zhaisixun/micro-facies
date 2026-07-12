@@ -2,8 +2,8 @@
 """
 Hyperparameter experiment runner for well-log segmentation.
 
-Varies loss_mode, window_size, feature_cols, seg_decoder (OFAT by default),
-runs main.py for each configuration, and aggregates Acc@1 / mIoU into a CSV table.
+Varies loss_mode, window_size, feature_cols, seg_decoder, well_input_mode (OFAT by default),
+runs main.py for each configuration, and aggregates Acc@1 / mIoU / F1 into a CSV table.
 
 Example (one-factor-at-a-time, recommended):
     python scripts/run_hyperparam_experiments.py \\
@@ -46,9 +46,11 @@ class ExperimentConfig:
     window_size: int
     feature_cols: str
     seg_decoder: str
+    well_input_mode: str
     output_dir: str
     acc: Optional[float] = None
     miou: Optional[float] = None
+    f1: Optional[float] = None
     best_epoch_acc: Optional[float] = None
     best_epoch_miou: Optional[float] = None
     returncode: Optional[int] = None
@@ -75,6 +77,7 @@ def build_baseline() -> Dict[str, str]:
         "window_size": "128",
         "feature_cols": "GR,CNL,DEN",
         "seg_decoder": "uper",
+        "well_input_mode": "sliding_window",
     }
 
 
@@ -84,12 +87,20 @@ def generate_ofat_experiments(
     window_sizes: List[int],
     feature_cols_list: List[str],
     seg_decoders: List[str],
+    well_input_modes: List[str],
     base_output_dir: str,
 ) -> List[ExperimentConfig]:
     experiments: List[ExperimentConfig] = []
     exp_idx = 0
 
-    def add(exp_id: str, loss_mode: str, window_size: int, feature_cols: str, seg_decoder: str):
+    def add(
+        exp_id: str,
+        loss_mode: str,
+        window_size: int,
+        feature_cols: str,
+        seg_decoder: str,
+        well_input_mode: str,
+    ):
         nonlocal exp_idx
         out = os.path.join(base_output_dir, f"{exp_idx:02d}_{_safe_tag(exp_id)}")
         experiments.append(
@@ -99,6 +110,7 @@ def generate_ofat_experiments(
                 window_size=window_size,
                 feature_cols=feature_cols,
                 seg_decoder=seg_decoder,
+                well_input_mode=well_input_mode,
                 output_dir=out,
             )
         )
@@ -110,12 +122,20 @@ def generate_ofat_experiments(
         int(baseline["window_size"]),
         baseline["feature_cols"],
         baseline["seg_decoder"],
+        baseline["well_input_mode"],
     )
 
     for lm in loss_modes:
         if lm == baseline["loss_mode"]:
             continue
-        add(f"loss_{lm}", lm, int(baseline["window_size"]), baseline["feature_cols"], baseline["seg_decoder"])
+        add(
+            f"loss_{lm}",
+            lm,
+            int(baseline["window_size"]),
+            baseline["feature_cols"],
+            baseline["seg_decoder"],
+            baseline["well_input_mode"],
+        )
 
     for ws in window_sizes:
         if ws == int(baseline["window_size"]):
@@ -126,13 +146,21 @@ def generate_ofat_experiments(
             ws,
             baseline["feature_cols"],
             baseline["seg_decoder"],
+            baseline["well_input_mode"],
         )
 
     for fc in feature_cols_list:
         if fc == baseline["feature_cols"]:
             continue
         tag = _safe_tag(fc.replace(",", "-"))
-        add(f"feat_{tag}", baseline["loss_mode"], int(baseline["window_size"]), fc, baseline["seg_decoder"])
+        add(
+            f"feat_{tag}",
+            baseline["loss_mode"],
+            int(baseline["window_size"]),
+            fc,
+            baseline["seg_decoder"],
+            baseline["well_input_mode"],
+        )
 
     for sd in seg_decoders:
         if sd == baseline["seg_decoder"]:
@@ -143,6 +171,19 @@ def generate_ofat_experiments(
             int(baseline["window_size"]),
             baseline["feature_cols"],
             sd,
+            baseline["well_input_mode"],
+        )
+
+    for wim in well_input_modes:
+        if wim == baseline["well_input_mode"]:
+            continue
+        add(
+            f"input_{wim}",
+            baseline["loss_mode"],
+            int(baseline["window_size"]),
+            baseline["feature_cols"],
+            baseline["seg_decoder"],
+            wim,
         )
 
     return experiments
@@ -153,11 +194,15 @@ def generate_grid_experiments(
     window_sizes: List[int],
     feature_cols_list: List[str],
     seg_decoders: List[str],
+    well_input_modes: List[str],
     base_output_dir: str,
 ) -> List[ExperimentConfig]:
     experiments: List[ExperimentConfig] = []
-    for i, (lm, ws, fc, sd) in enumerate(product(loss_modes, window_sizes, feature_cols_list, seg_decoders)):
-        exp_id = f"grid_lm-{lm}_ws-{ws}_fc-{_safe_tag(fc.replace(',', '-'))}_sd-{sd}"
+    combos = product(loss_modes, window_sizes, feature_cols_list, seg_decoders, well_input_modes)
+    for i, (lm, ws, fc, sd, wim) in enumerate(combos):
+        exp_id = (
+            f"grid_lm-{lm}_ws-{ws}_fc-{_safe_tag(fc.replace(',', '-'))}_sd-{sd}_wim-{wim}"
+        )
         experiments.append(
             ExperimentConfig(
                 exp_id=exp_id,
@@ -165,6 +210,7 @@ def generate_grid_experiments(
                 window_size=ws,
                 feature_cols=fc,
                 seg_decoder=sd,
+                well_input_mode=wim,
                 output_dir=os.path.join(base_output_dir, f"{i:02d}_{_safe_tag(exp_id)}"),
             )
         )
@@ -185,6 +231,7 @@ def build_main_command(exp: ExperimentConfig, args: argparse.Namespace) -> List[
         "--use_1d_conv", "true",
         "--seg_decoder", exp.seg_decoder,
         "--loss_mode", exp.loss_mode,
+        "--well_input_mode", exp.well_input_mode,
         "--model", args.model,
         "--window_size", str(ws),
         "--input_size", str(ws),
@@ -275,6 +322,22 @@ def parse_train_log(train_log_path: str) -> Tuple[Optional[float], Optional[floa
     return acc, miou
 
 
+def parse_f1_score(output_dir: str, train_log_path: str) -> Optional[float]:
+    """Parse macro-averaged F1 from segmentation_report.txt or train.log."""
+    f1_pattern = re.compile(r"^\s*macro avg\s+\S+\s+\S+\s+([0-9.]+)", re.MULTILINE)
+
+    report_path = os.path.join(output_dir, "segmentation_report.txt")
+    for path in (report_path, train_log_path):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            text = fh.read()
+        m = f1_pattern.search(text)
+        if m:
+            return float(m.group(1)) * 100.0
+    return None
+
+
 def run_one_experiment(exp: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
     Path(exp.output_dir).mkdir(parents=True, exist_ok=True)
     cmd = build_main_command(exp, args)
@@ -287,6 +350,7 @@ def run_one_experiment(exp: ExperimentConfig, args: argparse.Namespace) -> Exper
     print(f"[{exp.exp_id}] output -> {exp.output_dir}")
     print(f"  loss_mode={exp.loss_mode}  window_size={exp.window_size}")
     print(f"  feature_cols={exp.feature_cols}  seg_decoder={exp.seg_decoder}")
+    print(f"  well_input_mode={exp.well_input_mode}")
     print(f"{'=' * 72}")
 
     if args.dry_run:
@@ -309,13 +373,15 @@ def run_one_experiment(exp: ExperimentConfig, args: argparse.Namespace) -> Exper
     exp.best_epoch_miou = ep_miou
     exp.acc = fw_acc if fw_acc is not None else ep_acc
     exp.miou = fw_miou if fw_miou is not None else ep_miou
+    exp.f1 = parse_f1_score(exp.output_dir, train_log)
     exp.status = "ok" if exp.acc is not None else "no_metrics"
     if exp.status == "no_metrics":
         exp.error = "Could not parse Acc/mIoU from train.log or log.txt"
 
     acc_s = f"{exp.acc:.2f}%" if exp.acc is not None else "N/A"
     miou_s = f"{exp.miou:.2f}%" if exp.miou is not None else "N/A"
-    print(f"[{exp.exp_id}] done  acc={acc_s}  miou={miou_s}  status={exp.status}")
+    f1_s = f"{exp.f1:.2f}%" if exp.f1 is not None else "N/A"
+    print(f"[{exp.exp_id}] done  acc={acc_s}  miou={miou_s}  f1={f1_s}  status={exp.status}")
     return exp
 
 
@@ -326,8 +392,10 @@ def save_results(experiments: List[ExperimentConfig], out_csv: str, out_md: str)
         "window_size",
         "feature_cols",
         "seg_decoder",
+        "well_input_mode",
         "acc",
         "miou",
+        "f1",
         "best_epoch_acc",
         "best_epoch_miou",
         "status",
@@ -348,15 +416,16 @@ def save_results(experiments: List[ExperimentConfig], out_csv: str, out_md: str)
         "",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        "| exp_id | loss_mode | window_size | feature_cols | seg_decoder | Acc@1 (%) | mIoU (%) | status |",
-        "|:------:|:---------:|:-----------:|:-------------|:-----------:|:---------:|:--------:|:------:|",
+        "| exp_id | loss_mode | window_size | feature_cols | seg_decoder | well_input_mode | Acc@1 (%) | mIoU (%) | F1 (%) | status |",
+        "|:------:|:---------:|:-----------:|:-------------|:-----------:|:---------------:|:---------:|:--------:|:------:|:------:|",
     ]
     for exp in experiments:
         acc = f"{exp.acc:.2f}" if exp.acc is not None else "N/A"
         miou = f"{exp.miou:.2f}" if exp.miou is not None else "N/A"
+        f1 = f"{exp.f1:.2f}" if exp.f1 is not None else "N/A"
         lines.append(
             f"| {exp.exp_id} | {exp.loss_mode} | {exp.window_size} | {exp.feature_cols} | "
-            f"{exp.seg_decoder} | {acc} | {miou} | {exp.status} |"
+            f"{exp.seg_decoder} | {exp.well_input_mode} | {acc} | {miou} | {f1} | {exp.status} |"
         )
     with open(out_md, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -382,8 +451,13 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--feature_cols_list", default="GR,CNL,DEN|GR,GR_diff1,GR_diff2|GR,CNL",
                    help='pipe-separated feature sets, e.g. "GR,CNL,DEN|GR,GR_diff1,GR_diff2"')
     p.add_argument("--seg_decoders", default="lite,uper")
+    p.add_argument(
+        "--well_input_modes",
+        default="sliding_window,whole_well",
+        help="comma-separated well input modes: sliding_window (滑窗) or whole_well (整口井)",
+    )
 
-    p.add_argument("--xlsx_path", default="./facies-gr-diff0607-用GR-CNL-DEN.xlsx")
+    p.add_argument("--xlsx_path", default="../facies-gr-diff0614-用GR-CNL-DEN.xlsx")
     p.add_argument("--label_col", default="facies")
     p.add_argument("--depth_col", default="DEPT")
     p.add_argument("--model", default="convnext_tiny")
@@ -420,22 +494,35 @@ def main() -> None:
     window_sizes = [int(x) for x in _split_list(args.window_sizes)]
     feature_cols_list = _split_feature_sets(args.feature_cols_list)
     seg_decoders = _split_list(args.seg_decoders)
+    well_input_modes = _split_list(args.well_input_modes)
     baseline = build_baseline()
 
     if args.mode == "ofat":
         experiments = generate_ofat_experiments(
-            baseline, loss_modes, window_sizes, feature_cols_list, seg_decoders, args.base_output_dir
+            baseline,
+            loss_modes,
+            window_sizes,
+            feature_cols_list,
+            seg_decoders,
+            well_input_modes,
+            args.base_output_dir,
         )
     else:
         experiments = generate_grid_experiments(
-            loss_modes, window_sizes, feature_cols_list, seg_decoders, args.base_output_dir
+            loss_modes,
+            window_sizes,
+            feature_cols_list,
+            seg_decoders,
+            well_input_modes,
+            args.base_output_dir,
         )
 
     print(f"Planned experiments: {len(experiments)}  (mode={args.mode})")
     for exp in experiments:
         print(
             f"  - {exp.exp_id}: loss={exp.loss_mode}, ws={exp.window_size}, "
-            f"feat={exp.feature_cols}, decoder={exp.seg_decoder}"
+            f"feat={exp.feature_cols}, decoder={exp.seg_decoder}, "
+            f"well_input_mode={exp.well_input_mode}"
         )
 
     results: List[ExperimentConfig] = []
@@ -449,15 +536,19 @@ def main() -> None:
     print(f"\n{'=' * 72}")
     print("Experiment summary")
     print(f"{'=' * 72}")
-    header = f"{'exp_id':<18} {'loss_mode':<14} {'ws':>4} {'decoder':<6} {'Acc':>8} {'mIoU':>8} {'status':<10}"
+    header = (
+        f"{'exp_id':<18} {'loss_mode':<14} {'ws':>4} {'decoder':<6} {'input':<14} "
+        f"{'Acc':>8} {'mIoU':>8} {'F1':>8} {'status':<10}"
+    )
     print(header)
     print("-" * len(header))
     for exp in results:
         acc_s = f"{exp.acc:.2f}" if exp.acc is not None else "N/A"
         miou_s = f"{exp.miou:.2f}" if exp.miou is not None else "N/A"
+        f1_s = f"{exp.f1:.2f}" if exp.f1 is not None else "N/A"
         print(
             f"{exp.exp_id:<18} {exp.loss_mode:<14} {exp.window_size:>4} {exp.seg_decoder:<6} "
-            f"{acc_s:>7}% {miou_s:>7}% {exp.status:<10}"
+            f"{exp.well_input_mode:<14} {acc_s:>7}% {miou_s:>7}% {f1_s:>7}% {exp.status:<10}"
         )
     print(f"\nSaved -> {summary_csv}")
     print(f"Saved -> {summary_md}")

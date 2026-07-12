@@ -257,14 +257,14 @@ def get_args_parser():
                              '(default: 0.2)')
     parser.add_argument('--window_size', default=128, type=int,      # 原始是128 
                         help='sliding window size for WELLLOG_XLSX')   # 滑动窗口大小
-    parser.add_argument('--well_input_mode', default='sliding_window',
+    parser.add_argument('--well_input_mode', default='sliding_window',   # 原始是sliding_window，现在改成了whole_well
                         choices=['sliding_window', 'whole_well'],
                         help='WELLLOG_XLSX input strategy: fixed sliding windows or one variable-length sample per well.')
     parser.add_argument('--whole_well_max_length', default=0, type=int,
                         help='Optional max sequence length in whole_well mode. '
                              '0 = use full well; >0 crops/pads training wells to this length '
                              '(train=random crop, val/eval=keep head segment).')
-    parser.add_argument('--use_pad_mask', type=str2bool, default=True,
+    parser.add_argument('--use_pad_mask', type=str2bool, default=True,    # 前向传播时，对padding位置mask，padding位置不参与卷积计算
                         help='In whole_well mode, mask padded positions in model forward '
                              'so zero padding does not affect convolutions.')
     parser.add_argument('--window_stride', default=0, type=int,   
