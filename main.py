@@ -70,6 +70,8 @@ def get_args_parser():
                         help='1D segmentation decoder: lite (single-scale head) or uper (UPerNet-style).')
     parser.add_argument('--decoder_channels', default=256, type=int,
                         help='Bottleneck channels for UPerNet-style 1D decoder.')
+    parser.add_argument('--encoder_output_stride', default=32, type=int, choices=[8, 16, 32],
+                        help='Total downsampling factor of the 1D UPer encoder. Use 8 for thin-layer preservation.')
     parser.add_argument('--layer_scale_init_value', default=1e-6, type=float,
                         help="Layer scale initial values")
     parser.add_argument(
@@ -761,6 +763,7 @@ def main(args):
     )
     if getattr(args, "task_mode", "classification") == "segmentation" and getattr(args, "seg_decoder", "uper") == "uper":
         model_kwargs["decoder_channels"] = args.decoder_channels
+        model_kwargs["encoder_output_stride"] = args.encoder_output_stride
 
     backbone = create_model(
         model_name,

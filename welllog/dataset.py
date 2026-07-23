@@ -81,6 +81,8 @@ def _load_single_well(ws, feature_cols, label_col, depth_col, label_map):
 
     return {
         "feat": feat,
+        "feat_mean": feat_mean.reshape(-1).astype(np.float32),
+        "feat_std": feat_std.reshape(-1).astype(np.float32),
         "labels": labels,
         "depths": depths,
         "valid_mask": valid_mask,
