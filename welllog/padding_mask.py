@@ -28,6 +28,7 @@ def downsample_valid_mask(
     mask: torch.Tensor,
     kernel_size: int,
     stride: int,
+    padding: int = 0,
 ) -> torch.Tensor:
     """Downsample mask after a strided conv.
 
@@ -35,7 +36,7 @@ def downsample_valid_mask(
     so padded zeros cannot leak into real depth points.
     """
     inv = (~mask).float().unsqueeze(1)
-    bad = F.max_pool1d(inv, kernel_size=kernel_size, stride=stride, padding=0)
+    bad = F.max_pool1d(inv, kernel_size=kernel_size, stride=stride, padding=padding)
     return (bad.squeeze(1) < 0.5)
 
 

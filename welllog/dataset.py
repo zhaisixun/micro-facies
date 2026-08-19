@@ -45,9 +45,9 @@ def _load_single_well(ws, feature_cols, label_col, depth_col, label_map):
     valid_mask = np.ones((len(rows),), dtype=bool)
     depth_idx = col_to_idx.get(depth_col)
 
-    for i, row in enumerate(rows):
+    for i, row in enumerate(rows):  # 遍历每一行
         depths.append(row[depth_idx] if depth_idx is not None else None)
-        for j, col in enumerate(feature_cols):
+        for j, col in enumerate(feature_cols):  # 遍历每一列
             v = row[col_to_idx[col]]
             if v is None or str(v).strip() == "":
                 feat[i, j] = np.nan
@@ -65,21 +65,24 @@ def _load_single_well(ws, feature_cols, label_col, depth_col, label_map):
             else:
                 labels.append(label_map[lab])
 
-    for j in range(feat.shape[1]):
+    for j in range(feat.shape[1]):  # 遍历每一列
         col_data = feat[:, j]
         col_median = np.nanmedian(col_data)
         if np.isnan(col_median):
             col_median = 0.0
         col_data[np.isnan(col_data)] = col_median
         feat[:, j] = col_data
-
-    feat_mean = feat.mean(axis=0, keepdims=True)
+    # 归一化
+    # 每条曲线单独归一化
+    feat_mean = feat.mean(axis=0, keepdims=True) # 计算每一列的均值
     feat_std = feat.std(axis=0, keepdims=True)
     feat_std[feat_std < 1e-6] = 1.0
     feat = (feat - feat_mean) / feat_std
 
     return {
         "feat": feat,
+        "feat_mean": feat_mean.reshape(-1).astype(np.float32),
+        "feat_std": feat_std.reshape(-1).astype(np.float32),
         "labels": labels,
         "depths": depths,
         "valid_mask": valid_mask,

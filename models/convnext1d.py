@@ -96,11 +96,11 @@ class ConvNeXt1d(nn.Module):
 
         self.downsample_layers = nn.ModuleList()
         stem = nn.Sequential(
-            nn.Conv1d(in_chans, dims[0], kernel_size=4, stride=4),
+            nn.Conv1d(in_chans, dims[0], kernel_size=4, stride=4),   # stem层下采样先缩小4倍
             LayerNorm1d(dims[0], eps=1e-6, data_format="channels_first"),
         )
         self.downsample_layers.append(stem)
-        for i in range(3):
+        for i in range(3):  # 共4个block，每两个block之间一个下采样层
             downsample_layer = nn.Sequential(
                 LayerNorm1d(dims[i], eps=1e-6, data_format="channels_first"),
                 nn.Conv1d(dims[i], dims[i + 1], kernel_size=2, stride=2),
@@ -110,7 +110,7 @@ class ConvNeXt1d(nn.Module):
         self.stages = nn.ModuleList()
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
         cur = 0
-        for i in range(4):
+        for i in range(4):   # 4个convnext block
             stage = nn.Sequential(
                 *[
                     Block1d(
@@ -118,7 +118,7 @@ class ConvNeXt1d(nn.Module):
                         drop_path=dp_rates[cur + j],
                         layer_scale_init_value=layer_scale_init_value,
                     )
-                    for j in range(depths[i])
+                    for j in range(depths[i])   # block数
                 ]
             )
             self.stages.append(stage)
@@ -136,7 +136,7 @@ class ConvNeXt1d(nn.Module):
 
     def forward_features(self, x):
         for i in range(4):
-            x = self.downsample_layers[i](x)
+            x = self.downsample_layers[i](x)   # 加上stem一共4层下采样
             x = self.stages[i](x)
         return self.norm(x.mean(-1))
 
@@ -171,12 +171,14 @@ class PPM1d(nn.Module):
     """1D Pyramid Pooling Module (PPM) used by UPerHead."""
 
     def __init__(self, in_channels, out_channels, pool_scales=(1, 2, 3, 6)):
+        # in_channels = out_channels = 256
         super().__init__()
         self.pool_scales = pool_scales
-        branch_channels = out_channels // len(pool_scales)   #256//4=64
+        branch_channels = out_channels // len(pool_scales)   #256//4=64, 原文是512
         self.branches = nn.ModuleList([
             nn.Sequential(
                 nn.AdaptiveAvgPool1d(scale),
+                # 原文是4096->512，现在改成了256->64
                 nn.Conv1d(in_channels, branch_channels, kernel_size=1, bias=False),
                 LayerNorm1d(branch_channels, eps=1e-6, data_format="channels_first"),
                 nn.GELU(),
@@ -425,6 +427,7 @@ class ConvNeXt1dUPerSeg(nn.Module):
         head_init_scale=1.0,
         decoder_channels=256,
         pool_scales=(1, 2, 3, 6),
+        encoder_output_stride=32,
         **kwargs,
     ):
         super().__init__()
@@ -432,16 +435,35 @@ class ConvNeXt1dUPerSeg(nn.Module):
             ignored = ", ".join(sorted(kwargs.keys()))
             print(f"ConvNeXt1dUPerSeg: ignoring unsupported kwargs: {ignored}")
 
+        if encoder_output_stride not in (8, 16, 32):
+            raise ValueError("encoder_output_stride must be one of 8, 16, or 32")
+        self.encoder_output_stride = int(encoder_output_stride)
+        if self.encoder_output_stride == 32:
+            downsample_cfgs = [(4, 4, 0), (2, 2, 0), (2, 2, 0), (2, 2, 0)]
+        elif self.encoder_output_stride == 16:
+            downsample_cfgs = [(3, 2, 1), (2, 2, 0), (2, 2, 0), (2, 2, 0)]
+        else:
+            downsample_cfgs = [(3, 2, 1), (2, 2, 0), (2, 2, 0), (3, 1, 1)]
+        self._downsample_cfgs = downsample_cfgs
+
         self.downsample_layers = nn.ModuleList()
+        stem_kernel, stem_stride, stem_padding = downsample_cfgs[0]
         stem = nn.Sequential(
-            nn.Conv1d(in_chans, dims[0], kernel_size=4, stride=4),
+            nn.Conv1d(
+                in_chans, dims[0], kernel_size=stem_kernel,
+                stride=stem_stride, padding=stem_padding,
+            ),
             LayerNorm1d(dims[0], eps=1e-6, data_format="channels_first"),
         )
         self.downsample_layers.append(stem)
         for i in range(3):
+            kernel_size, stride, padding = downsample_cfgs[i + 1]
             downsample_layer = nn.Sequential(
                 LayerNorm1d(dims[i], eps=1e-6, data_format="channels_first"),
-                nn.Conv1d(dims[i], dims[i + 1], kernel_size=2, stride=2),
+                nn.Conv1d(
+                    dims[i], dims[i + 1], kernel_size=kernel_size,
+                    stride=stride, padding=padding,
+                ),
             )
             self.downsample_layers.append(downsample_layer)
 
@@ -481,7 +503,7 @@ class ConvNeXt1dUPerSeg(nn.Module):
         _init_conv1d_linear(m)
 
     def _encoder_downsample_cfgs(self):
-        return [(4, 4), (2, 2), (2, 2), (2, 2)]
+        return self._downsample_cfgs
 
     def forward_encoder_multi(self, x, lengths=None):
         """Return normalized feature maps from all four encoder stages."""
@@ -495,8 +517,10 @@ class ConvNeXt1dUPerSeg(nn.Module):
         for i in range(4):
             x = self.downsample_layers[i](x)
             if mask is not None:
-                kernel_size, stride = self._encoder_downsample_cfgs()[i]
-                mask = downsample_valid_mask(mask, kernel_size=kernel_size, stride=stride)
+                kernel_size, stride, padding = self._encoder_downsample_cfgs()[i]
+                mask = downsample_valid_mask(
+                    mask, kernel_size=kernel_size, stride=stride, padding=padding
+                )
                 x = apply_feature_mask(x, mask)
             x = self.stages[i](x)
             if mask is not None:

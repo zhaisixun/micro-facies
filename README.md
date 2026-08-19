@@ -118,6 +118,36 @@ python main.py \
   --lr 1e-3 --output_dir ./outputs/facies_baseline
 ```
 
+## Masked well-log pretraining
+
+Pretrain the three-channel 1D encoder with whole-curve and contiguous-depth
+masking. The input window and stride stay fixed at 128 and 32:
+
+```bash
+python pretrain_masked.py \
+  --val_ratio 0.2 --seed 42 \
+  --window_size 128 --window_stride 32 \
+  --encoder_output_stride 8 \
+  --output_dir outputs/masked_pretrain
+```
+
+The checkpoint's `encoder` entry contains only transferable encoder weights.
+Fine-tune with the same encoder output stride:
+
+```bash
+python main.py \
+  --task_mode segmentation --use_1d_conv true \
+  --model convnext1d_tiny_uper_seg \
+  --encoder_output_stride 8 \
+  --finetune outputs/masked_pretrain/checkpoint-best.pth \
+  --model_key encoder \
+  --window_size 128 --window_stride 32
+```
+
+After pretraining, normalized validation-well targets and reconstructions are
+saved as `reconstruction_<well>.csv`. MAE, MSE, and MAPE are computed in the
+same normalized space and saved in `reconstruction_metrics.csv`.
+
 ## Acknowledgement
 This repository is built using the [timm](https://github.com/rwightman/pytorch-image-models) library, [DeiT](https://github.com/facebookresearch/deit) and [BEiT](https://github.com/microsoft/unilm/tree/master/beit) repositories.
 

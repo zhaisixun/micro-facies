@@ -25,7 +25,7 @@ def collate_whole_well(
     if not batch:
         raise ValueError("collate_whole_well received an empty batch.")
 
-    xs, ys, ws = zip(*batch)   # xs是(C, L)的tensor, ys是(L,)的tensor, ws是标量float
+    xs, ys, ws = zip(*batch)   # xs是(C, L)的tensor, ys是(L,)的tensor, ws是每个样本的权重（不是class_weight）标量float
     lengths = torch.tensor([x.shape[-1] for x in xs], dtype=torch.long)  # 每个样本的实际长度
     max_len = int(lengths.max().item())  # 一个batch中最大的长度
     num_channels = xs[0].shape[0]  # 通道数
