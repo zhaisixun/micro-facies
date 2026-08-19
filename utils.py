@@ -437,12 +437,13 @@ def compute_class_weights(class_counts, nb_classes, min_count=1.0):
     weights = counts.sum() / (nb_classes * counts)
     return weights / weights.mean()
 
-
+# 将手动指定的类别权重转为权重张量
 def parse_manual_class_weights(weights_str, nb_classes, normalize=True):
     """Parse comma-separated per-class weights, e.g. '1,8,8,1' -> Tensor(nb_classes,)."""
     if not weights_str or not str(weights_str).strip():
         raise ValueError("Empty class_weights string.")
-
+        
+    # 将字符串按逗号分割，并去掉空格，得到每个类别的权重
     parts = [p.strip() for p in str(weights_str).split(",") if p.strip()]
     if len(parts) != nb_classes:
         raise ValueError(
@@ -487,7 +488,7 @@ def build_welllog_sample_weights(dataset, min_count=1.0):
     return torch.DoubleTensor(weights)
 
 
-def build_welllog_segmentation_sample_weights(
+def build_welllog_segmentation_sample_weights(   # 过采样权重，少样本采样权重高
     dataset,
     min_count=1.0,
     boost=5.0,

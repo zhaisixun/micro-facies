@@ -96,11 +96,11 @@ class ConvNeXt1d(nn.Module):
 
         self.downsample_layers = nn.ModuleList()
         stem = nn.Sequential(
-            nn.Conv1d(in_chans, dims[0], kernel_size=4, stride=4),
+            nn.Conv1d(in_chans, dims[0], kernel_size=4, stride=4),   # stem层下采样先缩小4倍
             LayerNorm1d(dims[0], eps=1e-6, data_format="channels_first"),
         )
         self.downsample_layers.append(stem)
-        for i in range(3):
+        for i in range(3):  # 共4个block，每两个block之间一个下采样层
             downsample_layer = nn.Sequential(
                 LayerNorm1d(dims[i], eps=1e-6, data_format="channels_first"),
                 nn.Conv1d(dims[i], dims[i + 1], kernel_size=2, stride=2),
@@ -110,7 +110,7 @@ class ConvNeXt1d(nn.Module):
         self.stages = nn.ModuleList()
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
         cur = 0
-        for i in range(4):
+        for i in range(4):   # 4个convnext block
             stage = nn.Sequential(
                 *[
                     Block1d(
@@ -118,7 +118,7 @@ class ConvNeXt1d(nn.Module):
                         drop_path=dp_rates[cur + j],
                         layer_scale_init_value=layer_scale_init_value,
                     )
-                    for j in range(depths[i])
+                    for j in range(depths[i])   # block数
                 ]
             )
             self.stages.append(stage)
@@ -136,7 +136,7 @@ class ConvNeXt1d(nn.Module):
 
     def forward_features(self, x):
         for i in range(4):
-            x = self.downsample_layers[i](x)
+            x = self.downsample_layers[i](x)   # 加上stem一共4层下采样
             x = self.stages[i](x)
         return self.norm(x.mean(-1))
 

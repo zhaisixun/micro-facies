@@ -8,11 +8,11 @@ from models.convnext1d import Block1d, LayerNorm1d, UPerHead1d, _init_conv1d_lin
 
 
 def _downsample_configs(output_stride):
-    if output_stride == 32:
+    if output_stride == 32:  # 缩小32倍
         return [(4, 4, 0), (2, 2, 0), (2, 2, 0), (2, 2, 0)]
-    if output_stride == 16:
+    if output_stride == 16:  # 缩小16倍
         return [(3, 2, 1), (2, 2, 0), (2, 2, 0), (2, 2, 0)]
-    if output_stride == 8:
+    if output_stride == 8:   # 缩小8倍
         return [(3, 2, 1), (2, 2, 0), (2, 2, 0), (3, 1, 1)]
     raise ValueError("encoder_output_stride must be one of 8, 16, or 32")
 

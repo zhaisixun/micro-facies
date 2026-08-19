@@ -66,7 +66,8 @@ class WellLogMetricModel(nn.Module):
             z = None
         return logits, z
 
-
+# 将普通convnext的权重映射到WellLogMetricModel的backbone.*键
+# 相当于在普通convnext的权重前加上backbone.前缀
 def adapt_checkpoint_state_dict(state_dict):
     """Map plain ConvNeXt keys to WellLogMetricModel backbone.* keys when needed."""
     if any(k.startswith("backbone.") for k in state_dict):

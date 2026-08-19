@@ -124,11 +124,11 @@ def get_args_parser():
                         help='Use AutoAugment policy. "v0" or "original". " + "(default: rand-m9-mstd0.5-inc1)'),
     parser.add_argument('--smoothing', type=float, default=0.1,
                         help='Label smoothing (default: 0.1)')
-    parser.add_argument('--class_weight', type=str2bool, default=True,  ############ 类别权重
+    parser.add_argument('--class_weight', type=str2bool, default=True,  ############ 类别权重，根据类别数量自动计算权重
                         help='Use inverse-frequency class weights in cross-entropy '
                              '(computed from training set class counts). '
                              'Ignored when --class_weights is set.')
-    parser.add_argument('--class_weights', default='', type=str,
+    parser.add_argument('--class_weights', default='', type=str,   ########### 可以手动指定各个类别权重
                         help='Manual per-class CE weights, comma-separated by class index '
                              '(e.g. "1,8,8,1" for 4 classes). Overrides --class_weight auto weights.')
     parser.add_argument('--class_weights_normalize', type=str2bool, default=True,
@@ -216,7 +216,7 @@ def get_args_parser():
                         help='finetune from checkpoint')
     parser.add_argument('--head_init_scale', default=1.0, type=float,
                         help='classifier head initial scale, typically adjusted in fine-tuning')
-    parser.add_argument('--model_key', default='model|module', type=str,
+    parser.add_argument('--model_key', default='model|module', type=str,   # 模型权重checkpoint中对应的key，通常是model或model_ema
                         help='which key to load from saved state dict, usually model or model_ema')
     parser.add_argument('--model_prefix', default='', type=str)
 
@@ -247,7 +247,7 @@ def get_args_parser():
                         help='comma-separated val wells (sheet names) for WELLLOG_XLSX')   # 手动指定验证wells
     parser.add_argument('--eval_wells', default='', type=str,   # 全部训练测试
                         help='Eval wells override for WELLLOG_XLSX. '
-                             '"same_as_train" = evaluate on training wells; '
+                             '"same_as_train" = evaluate on training wells; '  # 在训练wells上评估
                              '"all" = use every well in xlsx for both train and eval; '
                              'or comma-separated sheet names. Overrides --val_wells when set.')
     parser.add_argument('--auto_split_wells', type=str2bool, default=True,    # 自动划分训练测试wells
@@ -271,7 +271,7 @@ def get_args_parser():
                              'so zero padding does not affect convolutions.')
     parser.add_argument('--window_stride', default=0, type=int,   
                         help='sliding window stride for WELLLOG_XLSX; 0 = auto '
-                             '(segmentation: window_size // 4, classification: window_size // 2)')   # 滑动窗口步长
+                             '(segmentation: window_size // 4, classification: window_size // 2)')   # 训练滑动窗口步长
     parser.add_argument('--depth_col', default='DEPT', type=str,
                         help='depth column name in xlsx for WELLLOG_XLSX')
     
@@ -306,9 +306,9 @@ def get_args_parser():
     parser.add_argument('--infer_batch_size', default=256, type=int,
                         help='batch size for full-well inference after training (default: 256). '
                              'Larger values are faster but use more GPU memory.')
-    parser.add_argument('--infer_stride', default=0, type=int,
+    parser.add_argument('--infer_stride', default=0, type=int,   # 推理窗口步长
                         help='Full-well segmentation inference stride; 0 = window_size // 4.')
-    parser.add_argument('--infer_fusion', default='weighted_center',
+    parser.add_argument('--infer_fusion', default='weighted_center',   # 窗口融合方式
                         choices=['mean', 'weighted_center', 'vote'],
                         help='Overlap fusion strategy for segmentation inference.')
     parser.add_argument('--output_dir', default='./outputs/seg_w128_0614',        ########################
@@ -369,7 +369,7 @@ def get_args_parser():
 def _num_feature_cols(args):
     return len([c.strip() for c in args.feature_cols.split(",") if c.strip()])
 
-
+# --model 参数映射表
 _WELLLOG_MODEL_1D_MAP = {
     "convnext_tiny": "convnext1d_tiny",
     "convnext_small": "convnext1d_small",
@@ -429,7 +429,7 @@ def _resolve_welllog_model(args):
             if seg_decoder == "uper"
             else _WELLLOG_MODEL_1D_SEG_LITE_MAP
         )
-        mapped = seg_map.get(model_name)
+        mapped = seg_map.get(model_name)  # 将--model参数映射到具体的模型
         if mapped is None:
             raise ValueError(
                 f"--task_mode segmentation but --model '{model_name}' has no segmentation counterpart "
@@ -448,7 +448,8 @@ def _resolve_welllog_model(args):
 
     if model_name.startswith("convnext1d_"):
         return model_name, None
-
+    
+    # 非分割任务下的模型映射
     mapped = _WELLLOG_MODEL_1D_MAP.get(model_name)
     if mapped is None:
         raise ValueError(
@@ -513,7 +514,7 @@ def main(args):
     if args.data_set == "WELLLOG_XLSX":
         if not args.xlsx_path:
             raise ValueError("--xlsx_path is required for WELLLOG_XLSX")
-        eval_wells_key = str(getattr(args, "eval_wells", "") or "").strip().lower()
+        eval_wells_key = str(getattr(args, "eval_wells", "") or "").strip().lower()   # 全训练测试，最好不要！
         if eval_wells_key == "all":
             if args.auto_split_wells:
                 print("[eval_wells=all] Ignoring --auto_split_wells; using all wells for train and eval.")
@@ -521,7 +522,7 @@ def main(args):
             args.train_wells = ",".join(all_wells)
             args.val_wells = args.train_wells
             print(f"[eval_wells=all] train/eval ({len(all_wells)}): {all_wells}")
-        elif args.auto_split_wells:
+        elif args.auto_split_wells:   # 自动划分数据集
             train_wells, val_wells = auto_split_wells(
                 args.xlsx_path,
                 label_col=args.label_col,
@@ -542,7 +543,7 @@ def main(args):
             train_list = [w.strip() for w in args.train_wells.split(",") if w.strip()]
             val_list = resolve_eval_wells(args.eval_wells, train_list)
             args.val_wells = ",".join(val_list)
-            if eval_wells_key == "same_as_train":
+            if eval_wells_key == "same_as_train":   # 在训练井上eval
                 print(f"[eval_wells=same_as_train] eval on train wells ({len(val_list)}): {val_list}")
             else:
                 print(f"[eval_wells] eval wells ({len(val_list)}): {val_list}")
@@ -551,37 +552,39 @@ def main(args):
                 "--val_wells is required for WELLLOG_XLSX when "
                 "--auto_split_wells is false and --eval_wells is not set."
             )
+
         if args.task_mode == "segmentation":
             if not args.use_1d_conv:
                 raise ValueError("WELLLOG_XLSX segmentation currently supports only --use_1d_conv true.")
             well_input_mode = getattr(args, "well_input_mode", "sliding_window")
             if well_input_mode == "whole_well":
                 if args.input_size != args.window_size:
-                    print(
+                    print(   # 整口井输入不必input_size=window_size
                         "[whole_well] input_size/window_size are ignored; "
                         "each batch item uses the full (or cropped) well length."
                     )
             elif args.input_size != args.window_size:
-                print(
+                print(   # 划窗输入必须input_size=window_size
                     "[segmentation] input_size must match window_size for point-wise label alignment; "
                     f"setting input_size {args.input_size} -> {args.window_size}."
                 )
-                args.input_size = args.window_size
-            if args.use_supcon:
-                print("[segmentation] SupCon is sample-level in this codebase; disabling --use_supcon.")
-                args.use_supcon = False
-            if args.infer_mode != "linear":
-                print("[segmentation] Prototype inference is not supported; using infer_mode=linear.")
-                args.infer_mode = "linear"
+                args.input_size = args.window_size   # 
+            # if args.use_supcon:
+            #     print("[segmentation] SupCon is sample-level in this codebase; disabling --use_supcon.")
+            #     args.use_supcon = False
+            # if args.infer_mode != "linear":   # 只有prototype推理模式用到
+            #     print("[segmentation] Prototype inference is not supported; using infer_mode=linear.")
+            #     args.infer_mode = "linear"
+
         if getattr(args, "well_input_mode", "sliding_window") == "whole_well":
-            if args.task_mode != "segmentation":
+            if args.task_mode != "segmentation":   # 整口井输入必须是分割任务
                 raise ValueError("well_input_mode=whole_well currently requires --task_mode segmentation.")
-            if not args.use_1d_conv:
+            if not args.use_1d_conv:    # 整口井输入必须是1D卷积
                 raise ValueError("well_input_mode=whole_well requires --use_1d_conv true.")
-            if args.seg_oversample:
+            if args.seg_oversample:   # 整口井输入不支持过采样
                 print("[whole_well] seg_oversample is disabled (one sample per well).")
                 args.seg_oversample = False
-            if args.batch_size > 8:
+            if args.batch_size > 8:   # 整口井输入建议小批量
                 print(
                     f"[whole_well] Recommend smaller batch_size for long sequences "
                     f"(current batch_size={args.batch_size})."
@@ -614,7 +617,7 @@ def main(args):
     num_tasks = utils.get_world_size()    # 总进程数
     global_rank = utils.get_rank()    # 当前进程编号
 
-    args.best_metric = utils.resolve_best_metric(args.task_mode, args.best_metric)
+    args.best_metric = utils.resolve_best_metric(args.task_mode, args.best_metric)  # 评估指标
     print(f"Best checkpoint metric: {args.best_metric}")
 
     use_seg_oversample = (
@@ -660,7 +663,7 @@ def main(args):
         )
         print("Sampler_train = WeightedRandomSampler (balanced for SupCon)")
     else:
-        sampler_train = torch.utils.data.DistributedSampler(
+        sampler_train = torch.utils.data.DistributedSampler(   # 支持分布式训练的采样器
             dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True, seed=args.seed,
         )
         print("Sampler_train = %s" % str(sampler_train))
@@ -669,17 +672,19 @@ def main(args):
             print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
                     'This will slightly alter validation results as extra duplicate entries are added to achieve '
                     'equal num of samples per-process.')
-        sampler_val = torch.utils.data.DistributedSampler(            # 分布式采样器
+        sampler_val = torch.utils.data.DistributedSampler(            # 支持分布式评估的采样器
             dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
     else:
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)   # 顺序采样器
 
+    # 主进程负责创建日志目录和Tensorboard日志记录器
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
         log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
-
+    
+    # 主进程负责创建wandb日志记录器
     if global_rank == 0 and args.enable_wandb:
         wandb_logger = utils.WandbLogger(args)
     else:
@@ -725,7 +730,7 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-    dlka_stages = None
+    dlka_stages = None      # dlka只支持2d网络
     if args.dlka_stages is not None and not args.use_1d_conv:
         s = args.dlka_stages.strip().lower()
         if s in ("all", "true", "1"):
@@ -765,7 +770,7 @@ def main(args):
         model_kwargs["decoder_channels"] = args.decoder_channels
         model_kwargs["encoder_output_stride"] = args.encoder_output_stride
 
-    backbone = create_model(
+    backbone = create_model(   
         model_name,
         pretrained=False,
         **model_kwargs,
@@ -786,19 +791,19 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.finetune, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.finetune, map_location='cpu')
+            checkpoint = torch.load(args.finetune, map_location='cpu')   # 加载预训练权重
 
         print("Load ckpt from %s" % args.finetune)
         checkpoint_model = None
         for model_key in args.model_key.split('|'):
             if model_key in checkpoint:
-                checkpoint_model = checkpoint[model_key]
+                checkpoint_model = checkpoint[model_key]   # {model_key : state_dict} 取出model_key对应的权重state_dict
                 print("Load state_dict by model_key = %s" % model_key)
                 break
         if checkpoint_model is None:
-            checkpoint_model = checkpoint
+            checkpoint_model = checkpoint   
         if args.use_supcon:
-            checkpoint_model = adapt_checkpoint_state_dict(checkpoint_model)
+            checkpoint_model = adapt_checkpoint_state_dict(checkpoint_model)  # 适配WellLogMetricModel的state_dict
         state_dict = model.state_dict()
         for k in list(checkpoint_model.keys()):
             if k in state_dict and checkpoint_model[k].shape != state_dict[k].shape:
@@ -820,12 +825,12 @@ def main(args):
         print("Using EMA with decay = %.8f" % args.model_ema_decay)
 
     model_without_ddp = model
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)   # 总参数量
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
 
-    total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
+    total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()   
     if len(dataset_train) > 0:
         num_training_steps_per_epoch = max(
             1, (len(dataset_train) + total_batch_size - 1) // total_batch_size
@@ -877,10 +882,10 @@ def main(args):
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
-    class_weight_tensor = None
+    class_weight_tensor = None   # 类别权重（自动计算）
     inv_map = getattr(dataset_train, 'inv_label_map', {})
-    manual_weights = getattr(args, 'class_weights', '') or ''
-    if manual_weights.strip():
+    manual_weights = getattr(args, 'class_weights', '') or ''   # 手动指定类别权重
+    if manual_weights.strip():   # 手动指定权重需要转为tensor
         class_weight_tensor = utils.parse_manual_class_weights(
             manual_weights,
             args.nb_classes,
@@ -894,7 +899,7 @@ def main(args):
             f"Class weights (manual, normalize={args.class_weights_normalize}): {weight_info}"
         )
     elif args.class_weight and hasattr(dataset_train, 'class_counts'):
-        class_weight_tensor = utils.compute_class_weights(
+        class_weight_tensor = utils.compute_class_weights(      # 计算类别权重（逆频率，均值=1）
             dataset_train.class_counts, args.nb_classes).to(device)
         weight_info = {
             inv_map.get(i, i): round(class_weight_tensor[i].item(), 4)
@@ -907,7 +912,7 @@ def main(args):
     if args.task_mode == "segmentation":
         criterion = SegmentationLoss(
             mode=args.loss_mode,
-            weight=class_weight_tensor,
+            weight=class_weight_tensor,   # 类别权重
             ignore_index=args.ignore_index,
             focal_gamma=args.focal_gamma,
             ce_weight=args.ce_weight,

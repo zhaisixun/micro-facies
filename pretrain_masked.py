@@ -34,9 +34,9 @@ def parse_args():
     parser.add_argument("--window_stride", type=int, default=32)
     parser.add_argument("--channel_mask_prob", type=float, default=0.25)
     parser.add_argument("--depth_mask_prob", type=float, default=0.75)
-    parser.add_argument("--depth_span", type=int, default=16)
-    parser.add_argument("--depth_spans", type=int, default=2)
-    parser.add_argument("--encoder_output_stride", type=int, choices=[8, 16, 32], default=8)
+    parser.add_argument("--depth_span", type=int, default=16)           # mask长度
+    parser.add_argument("--depth_spans", type=int, default=2)          # mask数量
+    parser.add_argument("--encoder_output_stride", type=int, choices=[8, 16, 32], default=8)   # 编码器最终将样本缩小几倍
     parser.add_argument("--decoder_channels", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=100)
